@@ -592,46 +592,11 @@ export async function restoreOfflineShareBundle(
   return getOfflineSyncStatus();
 }
 
-export function applySyncedSnapshot(snapshot: Partial<OfflineDb>) {
-  const current = loadDb();
-  const nextUsers =
-    Array.isArray(snapshot.users) && snapshot.users.length > 0
-      ? mergeUsers(current.users, snapshot.users as OfflineUser[])
-      : current.users;
-  const nextDeleteLogs =
-    Array.isArray(snapshot.deleteLogs) && snapshot.deleteLogs.length > 0
-      ? mergeDeleteLogs(current.deleteLogs, snapshot.deleteLogs as DeleteLogItem[])
-      : current.deleteLogs;
-  cachedDb = {
-    users: nextUsers,
-    deleteLogs: nextDeleteLogs,
-    stageCategories:
-      Array.isArray(snapshot.stageCategories) && snapshot.stageCategories.length > 0
-        ? (snapshot.stageCategories as OfflineStageCategory[])
-        : current.stageCategories,
-    stages: Array.isArray(snapshot.stages) && snapshot.stages.length > 0
-      ? mergeStageAssets(current.stages, snapshot.stages as OfflineStageItem[])
-      : current.stages,
-    tableRows:
-      Array.isArray(snapshot.tableRows) && snapshot.tableRows.length > 0
-        ? (snapshot.tableRows as OfflineTableRow[])
-        : current.tableRows,
-    history:
-      Array.isArray(snapshot.history) && snapshot.history.length > 0
-        ? (snapshot.history as OfflineHistoryEntry[])
-        : current.history,
-    controlSessions:
-      Array.isArray(snapshot.controlSessions) && snapshot.controlSessions.length > 0
-        ? (snapshot.controlSessions as OfflineControlSession[])
-        : current.controlSessions,
-    machineTypes:
-      Array.isArray(snapshot.machineTypes) && snapshot.machineTypes.length > 0
-        ? (snapshot.machineTypes as MachineTypeItem[])
-        : current.machineTypes,
-  };
-
+export async function applySyncedSnapshot(snapshot: Partial<OfflineDb>) {
+  void snapshot;
+  await clearVideoAssets();
   resetVideoAssetCache();
-  saveDb(cachedDb, undefined, false);
+  clearOfflineDbStorage();
   markOfflineSnapshotSynced();
 }
 
@@ -702,6 +667,19 @@ function createSeedDb(): OfflineDb {
     controlSessions: [],
     deleteLogs: [],
     machineTypes: createSeedMachineTypes(),
+  };
+}
+
+function createEmptyDb(): OfflineDb {
+  return {
+    users: [],
+    stageCategories: [],
+    stages: [],
+    tableRows: [],
+    history: [],
+    controlSessions: [],
+    deleteLogs: [],
+    machineTypes: [],
   };
 }
 
@@ -783,6 +761,16 @@ function saveDb(db: OfflineDb, previousSnapshotJson?: string, markDirty = true) 
   if (markDirty && previousSnapshotJson !== nextSnapshotJson) {
     touchOfflineRevision();
   }
+}
+
+function clearOfflineDbStorage() {
+  cachedDb = createEmptyDb();
+
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.removeItem(STORAGE_KEY);
 }
 
 function loadMeta(): OfflineMeta {
@@ -869,58 +857,6 @@ function mergeDb(seed: OfflineDb, parsed: Partial<OfflineDb>): OfflineDb {
         ? (parsed.machineTypes as MachineTypeItem[])
         : seed.machineTypes,
   };
-}
-
-function mergeStageAssets(
-  currentStages: OfflineStageItem[],
-  nextStages: OfflineStageItem[],
-) {
-  return nextStages.map((stage) => {
-    const existing = currentStages.find((item) => item.id === stage.id);
-
-    return {
-      ...stage,
-      videoAssetId: stage.videoAssetId ?? existing?.videoAssetId ?? null,
-    };
-  });
-}
-
-function mergeUsers(currentUsers: OfflineUser[], nextUsers: OfflineUser[]) {
-  const merged = new Map<string, OfflineUser>();
-
-  currentUsers.forEach((user) => {
-    merged.set(normalizeText(user.username), user);
-  });
-
-  nextUsers.forEach((user) => {
-    const key = normalizeText(user.username);
-    const existing = merged.get(key);
-    merged.set(key, {
-      ...user,
-      password: user.password || existing?.password || '',
-      category: user.category || existing?.category || 'FF28',
-    });
-  });
-
-  return [...merged.values()].sort((left, right) =>
-    left.username.localeCompare(right.username),
-  );
-}
-
-function mergeDeleteLogs(
-  currentLogs: DeleteLogItem[],
-  nextLogs: DeleteLogItem[],
-) {
-  const merged = new Map<string, DeleteLogItem>();
-
-  currentLogs.forEach((log) => merged.set(log.id, log));
-  nextLogs.forEach((log) => merged.set(log.id, log));
-
-  return [...merged.values()].sort(
-    (left, right) =>
-      new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime() ||
-      right.id.localeCompare(left.id),
-  );
 }
 
 function mergeShareBundleStageData(current: OfflineDb, parsed: ReturnType<typeof validateShareBundle>) {
@@ -1063,6 +999,15 @@ async function replaceVideoAssets(
     dataUrl: string;
   }>,
 ) {
+  await clearVideoAssets();
+
+  for (const video of videos) {
+    const file = await dataUrlToFile(video.dataUrl, video.fileName, video.mimeType);
+    await storeVideoAsset(video.assetId, file);
+  }
+}
+
+async function clearVideoAssets() {
   const db = await openAssetDb();
   if (!db) {
     return;
@@ -1072,13 +1017,8 @@ async function replaceVideoAssets(
     const tx = db.transaction(ASSET_STORE_NAME, 'readwrite');
     tx.objectStore(ASSET_STORE_NAME).clear();
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error ?? new Error('Unable to reset asset store.'));
+    tx.onerror = () => reject(tx.error ?? new Error('Unable to clear asset store.'));
   });
-
-  for (const video of videos) {
-    const file = await dataUrlToFile(video.dataUrl, video.fileName, video.mimeType);
-    await storeVideoAsset(video.assetId, file);
-  }
 }
 
 function resetVideoAssetCache() {
@@ -1564,14 +1504,19 @@ async function handlePost(db: OfflineDb, path: string, body: OfflineRequestBody)
       throw new Error('Source stage not found.');
     }
 
-    const existingCodes = new Set(db.stages.map((item) => normalizeText(item.code)));
-    const code = ensureUniqueCode(`${source.code}-COPY`, existingCodes);
+    const relatedCopies = db.stages.filter((item) =>
+      normalizeText(item.code).startsWith(normalizeText(source.code)),
+    ).length;
+    const code = `${source.code}-COPY${relatedCopies + 1}`;
+    const duplicateName = `${source.name} Copy`;
     const nextStage: OfflineStageItem = {
       ...source,
       id: createId(),
       code,
-      stage: targetArea || source.stage,
+      name: duplicateName,
+      stage: source.stage,
       area: targetArea || source.area,
+      stageDate: source.stageDate || formatDate(new Date()),
       videoAssetId: source.videoAssetId ?? null,
       sortOrder: db.stages.length + 1,
       completed: false,
@@ -1588,7 +1533,10 @@ async function handlePost(db: OfflineDb, path: string, body: OfflineRequestBody)
     const sourceRows = db.tableRows.filter(
       (row) =>
         row.confirmed &&
-        (row.stageItemId === source.id || normalizeText(row.no) === normalizeText(source.code)),
+        (row.stageItemId === source.id ||
+          (!row.stageItemId &&
+            normalizeText(row.no) === normalizeText(source.code) &&
+            normalizeText(row.stage) === normalizeText(source.area ?? source.stage))),
     );
     const rowsToClone = sourceRows;
 
@@ -1597,11 +1545,12 @@ async function handlePost(db: OfflineDb, path: string, body: OfflineRequestBody)
         ...row,
         id: createId(),
         stageItemId: nextStage.id,
-        stage: nextStage.stage,
-        no: index === 0 ? nextStage.code : `${nextStage.code}-${index + 1}`,
-        confirmed: false,
-        done: false,
-        sortOrder: db.tableRows.length + index + 1,
+        stage: targetArea,
+        no: nextStage.code,
+        partName: duplicateName,
+        confirmed: row.confirmed,
+        done: row.done,
+        sortOrder: index + 1,
         nvaValues: [...row.nvaValues],
         vaValues: [...row.vaValues],
       });
@@ -2268,16 +2217,6 @@ function normalizeDateValue(value: unknown) {
   if (!trimmed) return '';
   const parsed = new Date(trimmed);
   return Number.isNaN(parsed.getTime()) ? trimmed : formatDate(parsed);
-}
-
-function ensureUniqueCode(base: string, existingCodes: Set<string>) {
-  let next = base.trim();
-  let suffix = 2;
-  while (existingCodes.has(normalizeText(next))) {
-    next = `${base.trim()}-${suffix}`;
-    suffix += 1;
-  }
-  return next;
 }
 
 function ensureUniqueStageName(

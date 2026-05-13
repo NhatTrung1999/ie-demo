@@ -51,7 +51,7 @@ export async function syncOfflineSnapshot() {
     }>('/sync/snapshot', formData);
 
     if (data.snapshot) {
-      applySyncedSnapshot(data.snapshot);
+      await applySyncedSnapshot(data.snapshot);
     }
 
     return data;

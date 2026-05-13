@@ -429,19 +429,43 @@ export class SyncService {
           });
         }
 
+        const controlSessionMap = new Map<
+          string,
+          {
+            session: SyncControlSession;
+            stageItemId: string | null;
+            stageCode: string;
+          }
+        >();
+
         for (const session of snapshot.controlSessions ?? []) {
           if (!session.id || !session.stageCode) {
             continue;
           }
 
+          const stageItemId = session.stageItemId
+            ? stageIdMap.get(session.stageItemId) ??
+              (isUuid(session.stageItemId) ? session.stageItemId : null)
+            : null;
+          const stageCode = normalizeScope(session.stageCode);
+          const sessionKey = stageItemId ? `stageItemId:${stageItemId}` : `stageCode:${stageCode}`;
+          const current = controlSessionMap.get(sessionKey);
+
+          if (!current || isNewerSyncRecord(session, current.session)) {
+            controlSessionMap.set(sessionKey, {
+              session,
+              stageItemId,
+              stageCode,
+            });
+          }
+        }
+
+        for (const { session, stageItemId, stageCode } of controlSessionMap.values()) {
           await tx.controlSession.create({
             data: {
               id: isUuid(session.id) ? session.id : undefined,
-              stageItemId: session.stageItemId
-                ? stageIdMap.get(session.stageItemId) ??
-                  (isUuid(session.stageItemId) ? session.stageItemId : null)
-                : null,
-              stageCode: normalizeScope(session.stageCode),
+              stageItemId,
+              stageCode,
               elapsed: Number(session.elapsed ?? 0),
               isRunning: Boolean(session.isRunning),
               segmentStart: Number(session.segmentStart ?? 0),
@@ -897,6 +921,23 @@ function normalizeOptionalNumber(value?: number | null) {
 function normalizeTenValues(values: number[]) {
   const next = Array.from({ length: 10 }, (_, index) => Number(values[index] ?? 0));
   return next.map((value) => (Number.isFinite(value) ? value : 0));
+}
+
+function isNewerSyncRecord(
+  next: { updatedAt?: string; createdAt?: string },
+  current: { updatedAt?: string; createdAt?: string },
+) {
+  return getSyncRecordTime(next) >= getSyncRecordTime(current);
+}
+
+function getSyncRecordTime(value: { updatedAt?: string; createdAt?: string }) {
+  const rawValue = value.updatedAt ?? value.createdAt;
+  if (!rawValue) {
+    return 0;
+  }
+
+  const timestamp = new Date(rawValue).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
 }
 
 function parseStageIdentity(rawName: string, fallbackCode: string) {
